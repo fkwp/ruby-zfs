@@ -176,7 +176,10 @@ class ZFS
 		attr_accessor :session
 
 		# Get an Array of all pools
-		def pools
+		def pools(ssh=nil)
+		    if ssh
+			  make_ssh_session(ssh)
+			end
 			cmd = [ZFS.zpool_path].flatten + %w(list -Honame)
 
 			stdout, stderr, status = @session.capture3(*cmd)
