@@ -23,6 +23,11 @@ end
 class ZFS
 	@zfs_path   = "zfs"
 	@zpool_path = "zpool"
+	
+	# session for "stdin, stdout, stderr" 
+    # can be local or remote via ssh
+	attr_accessor :session
+	@session = Open3
 
 	attr_reader :name
 	attr_reader :pool
@@ -55,7 +60,7 @@ class ZFS
 		cmd << '-d1' unless opts[:recursive]
 		cmd << name
 
-		stdout, stderr, status = Open3.capture3(*cmd)
+		stdout, stderr, status = @session.capture3(*cmd)
 		if status.success? and stderr == ""
 			stdout.lines.drop(1).collect do |filesystem|
 				ZFS(filesystem.chomp)
@@ -69,7 +74,7 @@ class ZFS
 	def exist?
 		cmd = [ZFS.zfs_path].flatten + %w(list -H -oname) + [name]
 
-		out, status = Open3.capture2e(*cmd)
+		out, status = @session.capture2e(*cmd)
 		if status.success? and out == "#{name}\n"
 			true
 		else
@@ -86,7 +91,7 @@ class ZFS
 		cmd += ['-V', opts[:volume]] if opts[:volume]
 		cmd << name
 
-		out, status = Open3.capture2e(*cmd)
+		out, status = @session.capture2e(*cmd)
 		if status.success? and out.empty?
 			return self
 		elsif out.match(/dataset already exists\n$/)
@@ -104,7 +109,7 @@ class ZFS
 		cmd << '-r' if opts[:children]
 		cmd << name
 
-		out, status = Open3.capture2e(*cmd)
+		out, status = @session.capture2e(*cmd)
 
 		if status.success? and out.empty?
 			return true
@@ -126,7 +131,7 @@ class ZFS
 	def [](key)
 		cmd = [ZFS.zfs_path].flatten + %w(get -ovalue -Hp) + [key.to_s, name]
 
-		stdout, stderr, status = Open3.capture3(*cmd)
+		stdout, stderr, status = @session.capture3(*cmd)
 
 		if status.success? and stderr.empty? and stdout.lines.count == 1
 			return stdout.chomp
@@ -138,7 +143,7 @@ class ZFS
 	def []=(key, value)
 		cmd = [ZFS.zfs_path].flatten + ['set', "#{key.to_s}=#{value}", name]
 
-		out, status = Open3.capture2e(*cmd)
+		out, status = @session.capture2e(*cmd)
 
 		if status.success? and out.empty?
 			return value
@@ -150,12 +155,13 @@ class ZFS
 	class << self
 		attr_accessor :zfs_path
 		attr_accessor :zpool_path
+		attr_accessor :session
 
 		# Get an Array of all pools
 		def pools
 			cmd = [ZFS.zpool_path].flatten + %w(list -Honame)
 
-			stdout, stderr, status = Open3.capture3(*cmd)
+			stdout, stderr, status = @session.capture3(*cmd)
 
 			if status.success? and stderr.empty?
 				stdout.lines.collect do |pool|
@@ -170,7 +176,7 @@ class ZFS
 		def mounts
 			cmd = [ZFS.zfs_path].flatten + %w(get -rHp -oname,value mountpoint)
 
-			stdout, stderr, status = Open3.capture3(*cmd)
+			stdout, stderr, status = @session.capture3(*cmd)
 
 			if status.success? and stderr.empty?
 				mounts = stdout.lines.collect do |line|
@@ -347,7 +353,7 @@ class ZFS::Snapshot < ZFS
 		cmd << name
 		cmd << newname
 
-		out, status = Open3.capture2e(*cmd)
+		out, status = @session.capture2e(*cmd)
 
 		if status.success? and out.empty?
 			initialize(newname)
@@ -368,7 +374,7 @@ class ZFS::Snapshot < ZFS
 		cmd << name
 		cmd << clone
 
-		out, status = Open3.capture2e(*cmd)
+		out, status = @session.capture2e(*cmd)
 
 		if status.success? and out.empty?
 			return ZFS(clone)
@@ -406,6 +412,12 @@ class ZFS::Snapshot < ZFS
 			raise AlreadyExists, "destination must not exist when receiving full stream"
 		end
 
+		if dest.is_a? ZFS
+		  dest_session = dest.session
+		else
+		  dest_session = @session
+		end
+
 		dest = dest.name if dest.is_a? ZFS
 		incr_snap = incr_snap.name if incr_snap.is_a? ZFS
 
@@ -419,8 +431,8 @@ class ZFS::Snapshot < ZFS
 		receive_opts << '-d' if opts[:use_sent_name]
 		receive_opts << dest
 
-		Open3.popen3(*receive_opts) do |rstdin, rstdout, rstderr, rthr|
-			Open3.popen3(*send_opts) do |sstdin, sstdout, sstderr, sthr|
+		dest_session.popen3(*receive_opts) do |rstdin, rstdout, rstderr, rthr|
+			@session.popen3(*send_opts) do |sstdin, sstdout, sstderr, sthr|
 				while !sstdout.eof?
 					rstdin.write(sstdout.read(16384))
 				end
@@ -451,7 +463,7 @@ class ZFS::Filesystem < ZFS
 		cmd << name
 		cmd << newname
 
-		out, status = Open3.capture2e(*cmd)
+		out, status = @session.capture2e(*cmd)
 
 		if status.success? and out.empty?
 			initialize(newname)
@@ -470,7 +482,7 @@ class ZFS::Filesystem < ZFS
 		cmd << '-r' if opts[:children]
 		cmd << "#{name}@#{snapname}"
 
-		out, status = Open3.capture2e(*cmd)
+		out, status = @session.capture2e(*cmd)
 
 		if status.success? and out.empty?
 			return ZFS("#{name}@#{snapname}")
@@ -486,7 +498,7 @@ class ZFS::Filesystem < ZFS
 		stdout, stderr = [], []
 		cmd = [ZFS.zfs_path].flatten + %w(list -H -d1 -r -oname -tsnapshot) + [name]
 
-		stdout, stderr, status = Open3.capture3(*cmd)
+		stdout, stderr, status = @session.capture3(*cmd)
 
 		if status.success? and stderr.empty?
 			stdout.lines.collect do |snap|
@@ -503,7 +515,7 @@ class ZFS::Filesystem < ZFS
 
 		cmd = [ZFS.zfs_path].flatten + ['promote', name]
 
-		out, status = Open3.capture2e(*cmd)
+		out, status = @session.capture2e(*cmd)
 
 		if status.success? and out.empty?
 			return self
