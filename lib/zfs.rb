@@ -4,18 +4,27 @@ require 'pathname'
 require 'date'
 require 'open3'
 
+# ssh remote session support
+require 'net-ssh-open3'
+
 # Get ZFS object.
-def ZFS(path)
+def ZFS(path, *ssh)
 	return path if path.is_a? ZFS
+
+    if ssh.size > 0
+	  ssh = ssh.first
+	else
+	  ssh = nil
+	end
 
 	path = Pathname(path).cleanpath.to_s
 
 	if path.match(/^\//)
 		ZFS.mounts[path]
 	elsif path.match('@')
-		ZFS::Snapshot.new(path)
+		ZFS::Snapshot.new(path, ssh)
 	else
-		ZFS::Filesystem.new(path)
+		ZFS::Filesystem.new(path, ssh)
 	end
 end
 
@@ -38,8 +47,17 @@ class ZFS
 	class InvalidName < Exception; end
 
 	# Create a new ZFS object (_not_ filesystem).
-	def initialize(name)
+	def initialize(name, ssh=nil)
+	    if ssh
+		  make_ssh_session(ssh) 
+		else
+		  @session = Open3
+		end
 		@name, @pool, @path = name, *name.split('/', 2)
+	end
+
+	def make_ssh_session(config)
+	  @session = Net::SSH.start(config[:host], config[:user], :password => config[:password])
 	end
 
 	# Return the parent of the current filesystem, or nil if there is none.
