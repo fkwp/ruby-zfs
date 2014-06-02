@@ -28,6 +28,12 @@ def ZFS(path, *ssh)
 	end
 end
 
+class String
+  def to_boolean
+	self.match(/(true|t|yes|y|1)$/i) != nil
+  end
+end
+
 # Pathname-inspired class to handle ZFS filesystems/snapshots/volumes
 class ZFS
 	@zfs_path   = "zfs"
