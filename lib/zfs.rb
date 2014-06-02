@@ -8,13 +8,13 @@ require 'open3'
 require 'net-ssh-open3'
 
 # Get ZFS object.
-def ZFS(path, *ssh)
+def ZFS(path, *param)
 	return path if path.is_a? ZFS
 
-    if ssh.size > 0
-	  ssh = ssh.first
+    if param.size > 0
+	  param = param.first
 	else
-	  ssh = nil
+	  param = nil
 	end
 
 	path = Pathname(path).cleanpath.to_s
@@ -22,9 +22,9 @@ def ZFS(path, *ssh)
 	if path.match(/^\//)
 		ZFS.mounts[path]
 	elsif path.match('@')
-		ZFS::Snapshot.new(path, ssh)
+		ZFS::Snapshot.new(path, param)
 	else
-		ZFS::Filesystem.new(path, ssh)
+		ZFS::Filesystem.new(path, param)
 	end
 end
 
@@ -53,9 +53,9 @@ class ZFS
 	class InvalidName < Exception; end
 
 	# Create a new ZFS object (_not_ filesystem).
-	def initialize(name, ssh=nil)
-	    if ssh
-		  @session = self.class.make_ssh_session(ssh) 
+	def initialize(name, session=nil)
+	    if session
+		  @session = self.class.make_ssh_session(session) 
 		else
 		  @session = Open3
 		end
@@ -72,7 +72,7 @@ class ZFS
 		if p == '.'
 			nil
 		else
-			ZFS(p)
+			ZFS(p, @session)
 		end
 	end
 
@@ -87,7 +87,7 @@ class ZFS
 		stdout, stderr, status = @session.capture3(*cmd)
 		if status.success? and stderr == ""
 			stdout.lines.drop(1).collect do |filesystem|
-				ZFS(filesystem.chomp)
+				ZFS(filesystem.chomp, @session)
 			end
 		else
 			raise Exception, "something went wrong"
@@ -182,13 +182,18 @@ class ZFS
 		attr_accessor :session
 
 	     def make_ssh_session(config)
-		   @session = Net::SSH.start(config[:host], config[:user], :password => config[:password])
+		   if config.is_a? Hash
+			 @session = Net::SSH.start(config[:host], config[:user], :password => config[:password])
+		   else
+			 @session = config
+		   end
+		   return @session
 		 end
 
 		# Get an Array of all pools
-		def pools(ssh=nil)
-		    if ssh
-			  make_ssh_session(ssh)
+		def pools(session=nil)
+		    if session
+			  make_ssh_session(session)
 			end
 
 			cmd = [ZFS.zpool_path].flatten + %w(list -Honame)
@@ -197,7 +202,7 @@ class ZFS
 
 			if status.success? and stderr.empty?
 				stdout.lines.collect do |pool|
-					ZFS(pool.chomp, ssh)
+					ZFS(pool.chomp, session)
 				end
 			else
 				raise Exception, "something went wrong"
@@ -205,9 +210,9 @@ class ZFS
 		end
 
 		# Get a Hash of all mountpoints and their filesystems
-		def mounts(ssh=nil)
-		    if ssh
-			  make_ssh_session(ssh)
+		def mounts(session=nil)
+		    if session
+			  make_ssh_session(session)
 			end
 
 			cmd = [ZFS.zfs_path].flatten + %w(get -rHp -oname,value mountpoint)
@@ -217,7 +222,7 @@ class ZFS
 			if status.success? and stderr.empty?
 				mounts = stdout.lines.collect do |line|
 					fs, path = line.chomp.split(/\t/, 2)
-					[path, ZFS(fs, ssh)]
+					[path, ZFS(fs, session)]
 				end
 				Hash[mounts]
 			else
@@ -269,7 +274,7 @@ class ZFS
 					if val.nil? or val == '-'
 						nil
 					else
-						ZFS(val)
+						ZFS(val, @session)
 					end
 				end
 
@@ -375,7 +380,7 @@ class ZFS::Snapshot < ZFS
 
 	# Just remove the snapshot-name
 	def parent
-		ZFS(name.sub(/@.+/, ''))
+		ZFS(name.sub(/@.+/, ''), @session)
 	end
 
 	# Rename snapshot
@@ -403,7 +408,7 @@ class ZFS::Snapshot < ZFS
 	def clone!(clone, opts={})
 		clone = clone.name if clone.is_a? ZFS
 
-		raise AlreadyExists if ZFS(clone).exist?
+		raise AlreadyExists if ZFS(clone, @session).exist?
 
 		cmd = [ZFS.zfs_path].flatten + ['clone']
 		cmd << '-p' if opts[:parents]
@@ -413,7 +418,7 @@ class ZFS::Snapshot < ZFS
 		out, status = @session.capture2e(*cmd)
 
 		if status.success? and out.empty?
-			return ZFS(clone)
+			return ZFS(clone, @session)
 		else
 			raise Exception, "something went wrong"
 		end
@@ -484,16 +489,16 @@ class ZFS::Filesystem < ZFS
 	# Return sub-filesystem.
 	def +(path)
 		if path.match(/^@/)
-			ZFS("#{name.to_s}#{path}")
+			ZFS("#{name.to_s}#{path}", @session)
 		else
 			path = Pathname(name) + path
-			ZFS(path.cleanpath.to_s)
+			ZFS(path.cleanpath.to_s, @session)
 		end
 	end
 
 	# Rename filesystem.
 	def rename!(newname, opts={})
-		raise AlreadyExists if ZFS(newname).exist?
+		raise AlreadyExists if ZFS(newname, @session).exist?
 
 		cmd = [ZFS.zfs_path].flatten + ['rename']
 		cmd << '-p' if opts[:parents]
@@ -513,7 +518,7 @@ class ZFS::Filesystem < ZFS
 	# Create a snapshot.
 	def snapshot(snapname, opts={})
 		raise NotFound, "no such filesystem" if !exist?
-		raise AlreadyExists, "#{snapname} exists" if ZFS("#{name}@#{snapname}").exist?
+		raise AlreadyExists, "#{snapname} exists" if ZFS("#{name}@#{snapname}", @session).exist?
 
 		cmd = [ZFS.zfs_path].flatten + ['snapshot']
 		cmd << '-r' if opts[:children]
@@ -522,7 +527,7 @@ class ZFS::Filesystem < ZFS
 		out, status = @session.capture2e(*cmd)
 
 		if status.success? and out.empty?
-			return ZFS("#{name}@#{snapname}")
+			return ZFS("#{name}@#{snapname}", @session)
 		else
 			raise Exception, "something went wrong"
 		end
@@ -539,7 +544,7 @@ class ZFS::Filesystem < ZFS
 
 		if status.success? and stderr.empty?
 			stdout.lines.collect do |snap|
-				ZFS(snap.chomp)
+				ZFS(snap.chomp, @session)
 			end
 		else
 			raise Exception, "something went wrong"
