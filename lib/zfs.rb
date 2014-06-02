@@ -49,16 +49,16 @@ class ZFS
 	# Create a new ZFS object (_not_ filesystem).
 	def initialize(name, ssh=nil)
 	    if ssh
-		  make_ssh_session(ssh) 
+		  @session = self.class.make_ssh_session(ssh) 
 		else
 		  @session = Open3
 		end
 		@name, @pool, @path = name, *name.split('/', 2)
 	end
 
-	def make_ssh_session(config)
-	  @session = Net::SSH.start(config[:host], config[:user], :password => config[:password])
-	end
+	# def make_ssh_session(config)
+	#   @session = Net::SSH.start(config[:host], config[:user], :password => config[:password])
+	# end
 
 	# Return the parent of the current filesystem, or nil if there is none.
 	def parent
@@ -175,18 +175,23 @@ class ZFS
 		attr_accessor :zpool_path
 		attr_accessor :session
 
+	     def make_ssh_session(config)
+		   @session = Net::SSH.start(config[:host], config[:user], :password => config[:password])
+		 end
+
 		# Get an Array of all pools
 		def pools(ssh=nil)
 		    if ssh
 			  make_ssh_session(ssh)
 			end
+
 			cmd = [ZFS.zpool_path].flatten + %w(list -Honame)
 
 			stdout, stderr, status = @session.capture3(*cmd)
 
 			if status.success? and stderr.empty?
 				stdout.lines.collect do |pool|
-					ZFS(pool.chomp)
+					ZFS(pool.chomp, ssh)
 				end
 			else
 				raise Exception, "something went wrong"
@@ -194,7 +199,11 @@ class ZFS
 		end
 
 		# Get a Hash of all mountpoints and their filesystems
-		def mounts
+		def mounts(ssh=nil)
+		    if ssh
+			  make_ssh_session(ssh)
+			end
+
 			cmd = [ZFS.zfs_path].flatten + %w(get -rHp -oname,value mountpoint)
 
 			stdout, stderr, status = @session.capture3(*cmd)
@@ -202,7 +211,7 @@ class ZFS
 			if status.success? and stderr.empty?
 				mounts = stdout.lines.collect do |line|
 					fs, path = line.chomp.split(/\t/, 2)
-					[path, ZFS(fs)]
+					[path, ZFS(fs, ssh)]
 				end
 				Hash[mounts]
 			else
