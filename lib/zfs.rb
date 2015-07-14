@@ -93,9 +93,10 @@ class ZFS
 
 		stdout, stderr, status = @session.capture3(*cmd)
 		if status.success? and stderr == ""
-			stdout.lines.drop(1).collect do |filesystem|
+			childs = stdout.lines.drop(1).collect do |filesystem|
 				ZFS(filesystem.chomp, @session)
 			end
+		    return childs
 		else
 			raise Exception, "something went wrong"
 		end
