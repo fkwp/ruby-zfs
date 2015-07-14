@@ -1,0 +1,3 @@
+#!/bin/bash
+gem build zfs.gemspec 
+gem install zfs-0.1.1.gem 
