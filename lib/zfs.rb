@@ -1,5 +1,4 @@
 # -*- mode: ruby; tab-width: 4; indent-tabs-mode: t -*-
-
 require 'pathname'
 require 'date'
 require 'open3'
@@ -61,10 +60,18 @@ class ZFS
 		end
 		@name, @pool, @path = name, *name.split('/', 2)
 	end
+		  
+	# If @session is a Open3 session the ZFS Filesystem is assumed to
+	# be local
+	def is_local
+	  return @session.class != Net::SSH::Connection::Session
+	end
 
-	# def make_ssh_session(config)
-	#   @session = Net::SSH.start(config[:host], config[:user], :password => config[:password])
-	# end
+	# If @session is of type Net::SSH the ZFS Filesystem is assumed to
+	# be on a remote machine
+	def is_remote
+	  return @session.class == Net::SSH::Connection::Session
+	end
 
 	# Return the parent of the current filesystem, or nil if there is none.
 	def parent
