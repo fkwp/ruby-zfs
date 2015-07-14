@@ -166,9 +166,9 @@ class ZFS
 		stdout, stderr, status = @session.capture3(*cmd)
 
 		if status.success? and stderr.empty? and stdout.lines.count == 1
-			return stdout.chomp
+		    return stdout.chomp
 		else
-			raise Exception, "something went wrong"
+		    raise Exception, "something went wrong.\nstderr: %s\nstdout: %s\nstatus: %s" % [stderr.chomp, stdout.chomp, status.to_s]
 		end
 	end
 
