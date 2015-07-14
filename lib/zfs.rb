@@ -446,49 +446,142 @@ class ZFS::Snapshot < ZFS
 			if incr_snap.is_a? String and incr_snap.match(/^@/)
 				incr_snap = self.parent + incr_snap
 			else
-				incr_snap = ZFS(incr_snap)
+				incr_snap = ZFS(incr_snap, @session)
 				raise ArgumentError, "incremental snapshot must be in the same filesystem as #{self}" if incr_snap.parent != self.parent
 			end
 
 			snapname = incr_snap.name.sub(/^.+@/, '@')
 
-			raise NotFound, "destination must already exist when receiving incremental stream" unless dest.exist?
 			raise NotFound, "snapshot #{snapname} must exist at #{self.parent}" if self.parent.snapshots.grep(incr_snap).empty?
-			raise NotFound, "snapshot #{snapname} must exist at #{dest}" if dest.snapshots.grep(dest + snapname).empty?
-		elsif opts[:use_sent_name]
+		    unless opts[:dry_run]
+			  raise NotFound, "destination must already exist when receiving incremental stream" unless dest.exist?
+			  raise NotFound, "snapshot #{snapname} must exist at #{dest}" if dest.snapshots.grep(dest + snapname).empty?
+			end
+		elsif (opts[:use_sent_name] || opts[:use_last_element_name])
 			raise NotFound, "destination must already exist when using sent name" unless dest.exist?
 		elsif dest.exist?
-			raise AlreadyExists, "destination must not exist when receiving full stream"
+			#raise AlreadyExists, "destination must not exist when receiving full stream"
 		end
 
+	    # determine belonging session
 		if dest.is_a? ZFS
 		  dest_session = dest.session
 		else
 		  dest_session = @session
 		end
 
-		dest = dest.name if dest.is_a? ZFS
+		dest_name = dest.name if dest.is_a? ZFS
 		incr_snap = incr_snap.name if incr_snap.is_a? ZFS
 
+	    # collecting all options for "zfs send"
 		send_opts = [ZFS.zfs_path].flatten + ['send']
-		send_opts.concat ['-p', incr_snap] if opts[:dataset_properties]
+	    send_opts << '-nv' if opts[:dry_run]
+		send_opts << '-p'  if opts[:dataset_properties]
 		send_opts.concat ['-i', incr_snap] if opts[:incremental]
 		send_opts.concat ['-I', incr_snap] if opts[:intermediary]
 		send_opts << '-R' if opts[:replication]
 		send_opts << name
+	    # if :transfer_mechanism_send is set append it using a pipe
+	    if (not opts[:dry_run]) && opts[:transfer_meachanism_send]
+		  send_opts << "|"
+		  if dest.is_remote
+			send_opts << opts[:transfer_meachanism_send].gsub("<dest>", dest_session.host)
+		  else
+			send_opts << opts[:transfer_meachanism_send]
+		  end
+		end
 
-		receive_opts = [ZFS.zfs_path].flatten + ['receive']
+	  # collecting all options for "zfs receive"
+	    receive_opts = []
+	    # if :transfer_mechanism_receive is set prefix it using a pipe
+    	if (not opts[:dry_run]) && opts[:transfer_meachanism_receive]
+		  if dest.is_remote
+			receive_opts = [  opts[:transfer_meachanism_receive] % dest_session.host, "|" ]
+		  else
+			receive_opts = [  opts[:transfer_meachanism_receive],  "|" ]
+		  end
+		  receive_opts << ZFS.zfs_path
+		  receive_opts << 'receive'
+		else
+		  receive_opts = [ZFS.zfs_path].flatten + ['receive']
+		end
+	    receive_opts << '-F' if	opts[:force_rollback]
+	    receive_opts << '-e' if	opts[:use_last_element_name]
 		receive_opts << '-d' if opts[:use_sent_name]
-		receive_opts << dest
+		receive_opts << '-v'
+		receive_opts << dest_name
 
-		dest_session.popen3(*receive_opts) do |rstdin, rstdout, rstderr, rthr|
-			@session.popen3(*send_opts) do |sstdin, sstdout, sstderr, sthr|
+        if opts[:dry_run]
+		  # dryrun mode
+		  out, status = @session.capture2e(*send_opts)
+
+		  raise Exception, "something went wrong" unless status.success? 
+		  my_size_string = out.split("\n").grep(/total estimated/).first.split.last + "ibyte"
+		  if my_size_string.to_f > 0 
+			return my_size_string, "0 byte/s"
+		  else
+			return "0 byte", "0 byte/s"
+		  end
+		else
+		  # actual sending the snapshot
+		  if (!opts[:transfer_meachanism_send].nil?) ^ (!opts[:transfer_meachanism_receive].nil?) # xor
+			raise Exception, "You have to specifiy both transfer mechanisms (:transfer_meachanism_send, :transfer_meachanism_receive)!"
+		  end
+
+		  # build send and receiving options
+		  my_send_opts = send_opts.join(" ")
+		  my_receive_opts = receive_opts.join(" ")
+
+		  # init states
+		  my_send_err = ""
+		  my_receive_err = ""
+		  my_receive_stdout = ""
+
+		  if opts[:transfer_meachanism_send] && opts[:transfer_meachanism_receive]
+			r_stdout = ""
+			r_status = ""
+			
+			# starting receiving cmd
+			receiving_thread = Thread.new { my_receive_stdout, my_receive_err, r_status = dest_session.capture3(my_receive_opts) }
+			sleep 2 # saefty time margin to settle the receiving cmd
+
+			# starting sending cmd
+			stdout, my_send_err, status = @session.capture3(my_send_opts)
+
+			# waiting for receiving cmd to finish
+			receiving_thread.join
+          else
+			dest_session.popen3(my_receive_opts) do |rstdin, rstdout, rstderr, rthr|
+			  rstdin.sync = true
+			  @session.popen3(my_send_opts) do |sstdin, sstdout, sstderr, sthr|
+			    sstdout.sync = true
 				while !sstdout.eof?
-					rstdin.write(sstdout.read(16384))
+				    rstdin.write(sstdout.read(128*1024))
 				end
 				raise "stink" unless sstderr.read == ''
-			end
+			   end
+			   my_send_err       = sstderr.read
+			   my_receive_err    = rstderr.read
+   			   my_receive_stdout = rstdout.read
+		    end
+		  end
+		  
+		  # Error handling
+		  if my_send_err.size > 0 || my_receive_err.size > 0
+			str_send_cmd    = "zfs send cmd: %s" % my_send_opts
+			str_receive_cmd = "zfs receive cmd: %s" % my_receive_opts
+			str_send_err    = "send stderr: %s" % my_send_err
+			str_receive_err = "send stderr: %s" % my_receive_err
+			raise Exception, "Something went wrong while sending a snapshot:\n%s\n%s\n%s\n%s" % [ str_send_cmd, str_send_err, str_receive_cmd, str_receive_err ]
+		  end
+
+		  # calculate some metrics and return
+		  my_size_match  = my_receive_stdout.split("\n").grep(/^received/).first.match(/^received(.*)stream.*\((.*\/sec)\)/)
+		  transfer_size  = my_size_match[1].strip.gsub(/([a-z])B$/i,'\1ibyte')
+		  transfer_speed = my_size_match[2].strip.gsub(/([a-z])B\/sec/i,"\1ibyte/s")
+ 		  return transfer_size, transfer_speed
 		end
+
 	end
 end
 
